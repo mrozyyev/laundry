@@ -1,0 +1,25 @@
+---
+import Laundry from '../components/Laundry.astro';
+import { getState } from '../lib/state';
+
+export const prerender = false;
+
+const state = getState();
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f1115" />
+    <title>Laundry room</title>
+    <meta name="description" content="Is the washing machine free? Report what you saw. No accounts." />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
+  </head>
+  <body>
+    <Laundry state={state} />
+  </body>
+</html>

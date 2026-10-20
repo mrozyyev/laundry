@@ -1,0 +1,28 @@
+{
+  "name": "laundry-status",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "start": "node ./dist/server/entry.mjs",
+    "check": "astro check",
+    "build:preview": "astro build --config astro.config.preview.mjs",
+    "vapid": "node scripts/generate-vapid.mjs"
+  },
+  "dependencies": {
+    "@astrojs/node": "^11.1.9",
+    "astro": "^7.4.1",
+    "better-sqlite3": "^13.0.3",
+    "web-push": "^3.6.7"
+  },
+  "devDependencies": {
+    "@astrojs/check": "^0.9.11",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.20.5",
+    "@types/web-push": "^3.6.4",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,25 @@
+---
+import Laundry from '../../src/components/Laundry.astro';
+import { demoState } from '../../src/lib/demo';
+
+const state = demoState();
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f1115" />
+    <title>Laundry room — static preview</title>
+    <meta
+      name="description"
+      content="Static preview of the shared laundry status board. Buttons work locally; nothing is saved."
+    />
+    <link rel="icon" href={`${base}/icon.svg`} />
+  </head>
+  <body>
+    <Laundry state={state} preview={true} />
+  </body>
+</html>

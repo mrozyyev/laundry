@@ -1,0 +1,710 @@
+---
+import type { MachineState } from '../lib/state';
+
+interface Props {
+  state: MachineState;
+  preview?: boolean;
+}
+
+const { state, preview = false } = Astro.props as Props;
+---
+
+<div id="app" data-status={state.status} data-preview={preview ? '1' : '0'}>
+  <main>
+    <header class="top">
+      <h1>Laundry room</h1>
+      <p class="sub">Beko B300 · 9 kg · 1200 rpm · 7:00–14:30 Mon–Thu · 7:00–12:00 Fri</p>
+    </header>
+
+    <section id="status" class={`status ${state.status}`} aria-live="polite">
+      <div id="headline" class="headline">{state.headline}</div>
+      <div id="detail" class="detail">{state.detail}</div>
+      <div id="meta" class="meta">{state.meta}</div>
+    </section>
+
+    <div id="warning" class="warning" hidden={!state.warning}>{state.warning}</div>
+
+    <p class="prompt">What did you just see?</p>
+
+    <section class="actions">
+      <button id="action-running" class="big amber" type="button">
+        Running — how long is left?
+      </button>
+      <button id="action-done" class="big red" type="button">
+        Finished — clothes still inside
+      </button>
+      <button id="action-free" class="big green" type="button">
+        Free / empty right now
+      </button>
+      <button
+        id="action-unload"
+        class="big green"
+        type="button"
+        hidden={state.status !== 'clothes_inside'}
+      >
+        I took the clothes out — now free
+      </button>
+      <button id="action-still" class="big ghost" type="button" hidden>
+        Still running — confirm
+      </button>
+    </section>
+
+    <section id="minutes-panel" class="panel" hidden>
+      <p class="panel-title">How many minutes does the machine screen say?</p>
+      <div id="chips" class="chips">
+        {[15, 30, 45, 60, 90, 120, 180].map((minutes) => (
+          <button type="button" data-min={minutes}>{minutes}</button>
+        ))}
+      </div>
+      <div class="custom-row">
+        <input
+          id="custom-min"
+          type="number"
+          inputmode="numeric"
+          min="1"
+          max="600"
+          placeholder="other"
+          aria-label="Minutes left"
+        />
+        <button id="custom-go" type="button">Save</button>
+      </div>
+      <p class="panel-hint">
+        Read it off the display. If the screen is dark and the door opens, the cycle already
+        finished — report “clothes still inside” instead.
+      </p>
+    </section>
+
+    <section class="notify" hidden={preview}>
+      <button id="notify" class="notify-btn" type="button">Notify me when it's free</button>
+      <p id="notify-hint" class="hint">No account. Permission lives on this phone.</p>
+    </section>
+
+    <footer>
+      {preview ? (
+        <p>
+          Static preview. The buttons work on this device, but nothing is stored and no
+          notifications are sent. The real app runs on a Node host.
+        </p>
+      ) : (
+        <p>
+          The app only knows what the last person reported. Tap once when you walk in — that's the
+          whole system.
+        </p>
+      )}
+      <p class="rule">
+        Agreed rule: finished + clothes inside means the next person may move them to the basket.
+      </p>
+    </footer>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</div>
+
+<script is:inline type="application/json" id="initial-state" set:html={JSON.stringify(state).replace(/</g, '\\u003c')}></script>
+
+<script>
+  import type { MachineState } from '../lib/state';
+
+  const el = <T extends HTMLElement>(id: string): T => {
+    const node = document.getElementById(id);
+    if (!node) throw new Error(`missing #${id}`);
+    return node as T;
+  };
+
+  const app = el('app');
+  const preview = app.dataset.preview === '1';
+  const statusEl = el('status');
+  const headline = el('headline');
+  const detail = el('detail');
+  const meta = el('meta');
+  const warning = el('warning');
+  const minutesPanel = el('minutes-panel');
+  const chips = el('chips');
+  const customMin = el<HTMLInputElement>('custom-min');
+  const unloadButton = el<HTMLButtonElement>('action-unload');
+  const stillButton = el<HTMLButtonElement>('action-still');
+  const notifyButton = el<HTMLButtonElement>('notify');
+  const notifyHint = el('notify-hint');
+  const toastEl = el('toast');
+
+  let current: MachineState | null = null;
+  let toastTimer: number | undefined;
+
+  function toast(message: string) {
+    toastEl.textContent = message;
+    toastEl.classList.add('show');
+    window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => toastEl.classList.remove('show'), 2600);
+  }
+
+  function clock(ts: number): string {
+    return new Intl.DateTimeFormat(undefined, {
+      hour: '2-digit',
+      minute: '2-digit'
+    }).format(new Date(ts));
+  }
+
+  function render(s: MachineState) {
+    current = s;
+    statusEl.className = `status ${s.status}`;
+    headline.textContent = s.headline;
+    detail.textContent = s.detail;
+    meta.textContent = s.meta;
+    if (s.warning) {
+      warning.textContent = s.warning;
+      warning.hidden = false;
+    } else {
+      warning.hidden = true;
+    }
+    app.dataset.status = s.status;
+    unloadButton.hidden = s.status !== 'clothes_inside';
+    stillButton.hidden = !(s.status === 'running' && s.endsAt);
+  }
+
+  function previewPost(kind: string, minutes?: number) {
+    if (!current) return;
+    const now = Date.now();
+    const base = current;
+
+    if (kind === 'free') {
+      current = {
+        ...base,
+        status: 'free',
+        headline: 'Free',
+        detail: 'Confirmed just now.',
+        warning: null,
+        freshness: 'fresh',
+        lastReportAt: now,
+        lastKind: 'free',
+        endsAt: null,
+        overdueSince: null,
+        minutesLeft: null
+      };
+    } else if (kind === 'done_with_clothes') {
+      current = {
+        ...base,
+        status: 'clothes_inside',
+        headline: 'Clothes inside',
+        detail: 'Just reported as finished with clothes still inside · just now.',
+        warning: null,
+        freshness: 'fresh',
+        lastReportAt: now,
+        lastKind: 'done_with_clothes',
+        endsAt: null,
+        overdueSince: now,
+        minutesLeft: null
+      };
+    } else {
+      const value = minutes ?? 60;
+      const endsAt = now + value * 60_000;
+      current = {
+        ...base,
+        status: 'running',
+        headline: `${value} min left`,
+        detail: `Seen running just now · ends around ${clock(endsAt)}.`,
+        warning: null,
+        freshness: 'fresh',
+        lastReportAt: now,
+        lastKind: 'running',
+        endsAt,
+        overdueSince: null,
+        minutesLeft: value
+      };
+    }
+
+    render(current);
+    minutesPanel.hidden = true;
+    toast('Preview only — nothing was saved.');
+  }
+
+  async function post(kind: string, minutes?: number) {
+    if (preview) {
+      previewPost(kind, minutes);
+      return;
+    }
+
+    try {
+      const response = await fetch('/api/report', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ kind, minutes })
+      });
+      if (!response.ok) {
+        const error = (await response.json().catch(() => ({}))) as { error?: string };
+        toast(error.error || 'Could not save that.');
+        return;
+      }
+      const s = (await response.json()) as MachineState;
+      render(s);
+      minutesPanel.hidden = true;
+      toast('Updated. Thanks.');
+      (navigator as Navigator & { vibrate?: (ms: number) => boolean }).vibrate?.(30);
+    } catch {
+      toast('No connection. Try again.');
+    }
+  }
+
+  async function refresh() {
+    if (preview) return;
+    try {
+      const response = await fetch('/api/state', { cache: 'no-store' });
+      if (response.ok) render((await response.json()) as MachineState);
+    } catch {
+      /* keep the last known state */
+    }
+  }
+
+  el('action-free').addEventListener('click', () => post('free'));
+  el('action-done').addEventListener('click', () => post('done_with_clothes'));
+  el('action-unload').addEventListener('click', () => post('free'));
+
+  el('action-running').addEventListener('click', () => {
+    minutesPanel.hidden = !minutesPanel.hidden;
+    if (!minutesPanel.hidden) customMin.focus({ preventScroll: true });
+  });
+
+  el('action-still').addEventListener('click', () => {
+    if (!current?.endsAt) return;
+    const minutes = Math.max(1, Math.ceil((current.endsAt - Date.now()) / 60_000));
+    void post('running', minutes);
+  });
+
+  chips.addEventListener('click', (event) => {
+    const target = event.target as HTMLElement;
+    const minutes = Number(target.dataset.min);
+    if (Number.isFinite(minutes) && minutes > 0) void post('running', minutes);
+  });
+
+  el('custom-go').addEventListener('click', () => {
+    const minutes = Math.round(Number(customMin.value));
+    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 600) {
+      toast('Enter minutes between 1 and 600.');
+      return;
+    }
+    void post('running', minutes);
+  });
+
+  customMin.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') el('custom-go').click();
+  });
+
+  function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
+    const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(base64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i += 1) bytes[i] = raw.charCodeAt(i);
+    return bytes;
+  }
+
+  async function enableNotifications() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      throw new Error('This browser does not support push notifications.');
+    }
+
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') {
+      throw new Error('Notifications are blocked. Allow them in your browser settings.');
+    }
+
+    const registration = await navigator.serviceWorker.register('/sw.js');
+    await navigator.serviceWorker.ready;
+
+    const keyResponse = await fetch('/api/vapid-public-key');
+    if (!keyResponse.ok) {
+      throw new Error('Notifications are not configured on the server yet.');
+    }
+    const { key } = (await keyResponse.json()) as { key: string };
+
+    const existing = await registration.pushManager.getSubscription();
+    const subscription =
+      existing ??
+      (await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(key)
+      }));
+
+    const saved = await fetch('/api/subscribe', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(subscription)
+    });
+    if (!saved.ok) throw new Error('The server rejected the subscription.');
+
+    notifyButton.textContent = 'Notifications on';
+    notifyButton.disabled = true;
+    notifyHint.textContent = 'You will get a ping when it is free or when clothes sit too long.';
+    toast('Notifications enabled.');
+  }
+
+  notifyButton.addEventListener('click', async () => {
+    notifyButton.disabled = true;
+    try {
+      await enableNotifications();
+    } catch (error) {
+      notifyButton.disabled = false;
+      notifyHint.textContent =
+        error instanceof Error ? error.message : 'Could not enable notifications.';
+    }
+  });
+
+  const isIos =
+    /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+    (navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent));
+  const standalone = (navigator as Navigator & { standalone?: boolean }).standalone === true;
+  if (isIos && !standalone && !preview) {
+    notifyHint.textContent =
+      'On iPhone: Share → Add to Home Screen, then open the installed app and enable notifications.';
+  }
+
+  if (!preview && 'serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+    navigator.serviceWorker.ready
+      .then((registration) => registration.pushManager.getSubscription())
+      .then((subscription) => {
+        if (subscription) {
+          notifyButton.textContent = 'Notifications on';
+          notifyButton.disabled = true;
+        }
+      })
+      .catch(() => {});
+  }
+
+  const initialEl = document.getElementById('initial-state');
+  if (initialEl?.textContent) {
+    try {
+      render(JSON.parse(initialEl.textContent) as MachineState);
+    } catch {
+      /* fall back to the server-rendered markup */
+    }
+  }
+
+  window.setInterval(refresh, 20_000);
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) void refresh();
+  });
+  void refresh();
+</script>
+
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0f1115;
+    --card: #171a21;
+    --text: #f2f5f9;
+    --muted: #98a2b3;
+    --line: #262b35;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+
+  html,
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  main {
+    max-width: 560px;
+    margin: 0 auto;
+    padding: 20px 16px 48px;
+  }
+
+  .top h1 {
+    margin: 0 0 4px;
+    font-size: 1.35rem;
+    letter-spacing: -0.02em;
+  }
+
+  .sub {
+    margin: 0 0 18px;
+    color: var(--muted);
+    font-size: 0.82rem;
+    line-height: 1.4;
+  }
+
+  .status {
+    --accent: #8b94a3;
+    border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    background: color-mix(in srgb, var(--accent) 12%, var(--card));
+    border-radius: 18px;
+    padding: 22px 20px;
+    margin-bottom: 12px;
+  }
+
+  .status.free {
+    --accent: #37d67a;
+  }
+  .status.running {
+    --accent: #f5a524;
+  }
+  .status.likely_free {
+    --accent: #21c7b7;
+  }
+  .status.clothes_inside {
+    --accent: #ff5c5c;
+  }
+  .status.unknown {
+    --accent: #8b94a3;
+  }
+  .status.closed {
+    --accent: #6b7280;
+  }
+
+  .headline {
+    font-size: clamp(1.9rem, 9vw, 2.9rem);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.05;
+    color: var(--accent);
+  }
+
+  .detail {
+    margin-top: 8px;
+    font-size: 0.98rem;
+    line-height: 1.45;
+  }
+
+  .meta {
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 0.78rem;
+  }
+
+  .warning {
+    margin: 0 0 12px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: #3a1417;
+    border: 1px solid #7a2a31;
+    color: #ffb4b8;
+    font-size: 0.88rem;
+    line-height: 1.4;
+  }
+
+  .prompt {
+    margin: 20px 0 10px;
+    color: var(--muted);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+
+  .actions {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  #app[data-status='clothes_inside'] #action-unload {
+    order: -3;
+  }
+  #app[data-status='clothes_inside'] #action-free {
+    order: -2;
+  }
+  #app[data-status='free'] #action-free {
+    order: -2;
+  }
+
+  .big {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 64px;
+    padding: 16px;
+    border-radius: 14px;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--text);
+    font-size: 1.02rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    touch-action: manipulation;
+    transition: transform 0.08s ease, opacity 0.15s ease;
+  }
+
+  .big:active {
+    transform: scale(0.985);
+    opacity: 0.9;
+  }
+
+  .big.green {
+    border-color: #2b6b46;
+    background: #12351f;
+    color: #b9f5cf;
+  }
+  .big.amber {
+    border-color: #7a5a1c;
+    background: #332408;
+    color: #ffd98a;
+  }
+  .big.red {
+    border-color: #7a2a31;
+    background: #331315;
+    color: #ffb4b8;
+  }
+  .big.ghost {
+    background: transparent;
+    color: var(--muted);
+    font-weight: 500;
+  }
+
+  .panel {
+    margin-top: 12px;
+    padding: 16px;
+    border-radius: 16px;
+    border: 1px solid var(--line);
+    background: var(--card);
+  }
+
+  .panel-title {
+    margin: 0 0 12px;
+    font-size: 0.92rem;
+  }
+
+  .chips {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px;
+  }
+
+  .chips button {
+    min-height: 52px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: #1e232c;
+    color: var(--text);
+    font-size: 1rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .chips button:active {
+    background: #2a3140;
+  }
+
+  .custom-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .custom-row input {
+    flex: 1;
+    min-height: 52px;
+    padding: 0 14px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: #12151b;
+    color: var(--text);
+    font-size: 1rem;
+    font-family: inherit;
+  }
+
+  .custom-row button {
+    min-width: 92px;
+    border-radius: 12px;
+    border: 1px solid #2b6b46;
+    background: #12351f;
+    color: #b9f5cf;
+    font-size: 1rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .panel-hint {
+    margin: 12px 0 0;
+    color: var(--muted);
+    font-size: 0.78rem;
+    line-height: 1.45;
+  }
+
+  .notify {
+    margin-top: 24px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+  }
+
+  .notify-btn {
+    width: 100%;
+    min-height: 54px;
+    border-radius: 14px;
+    border: 1px solid #2c4a6e;
+    background: #101c2b;
+    color: #b9d9ff;
+    font-size: 0.98rem;
+    font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+  }
+
+  .notify-btn:disabled {
+    opacity: 0.65;
+    cursor: default;
+  }
+
+  .hint {
+    margin: 10px 2px 0;
+    color: var(--muted);
+    font-size: 0.76rem;
+    line-height: 1.45;
+  }
+
+  footer {
+    margin-top: 28px;
+    color: var(--muted);
+    font-size: 0.76rem;
+    line-height: 1.5;
+  }
+
+  footer p {
+    margin: 0 0 8px;
+  }
+
+  .rule {
+    color: #c9a86a;
+  }
+
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: calc(20px + env(safe-area-inset-bottom));
+    transform: translate(-50%, 20px);
+    max-width: calc(100vw - 32px);
+    padding: 12px 18px;
+    border-radius: 999px;
+    background: #e8eef7;
+    color: #0f1115;
+    font-size: 0.88rem;
+    font-weight: 600;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s ease, transform 0.18s ease;
+    z-index: 10;
+  }
+
+  .toast.show {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .big,
+    .toast {
+      transition: none;
+    }
+  }
+</style>
